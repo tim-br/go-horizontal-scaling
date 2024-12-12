@@ -74,6 +74,9 @@ func registerService(client *clientv3.Client, instance ServiceInstance) error {
     return nil
 }
 
+// Simulate a service that can only handle N concurrent resource-intensive tasks
+var maxConcurrent = make(chan struct{}, 1) // Only 1 concurrent request
+
 func main() {
     etcdClient, err := connectEtcd()
     if err != nil {
@@ -96,7 +99,40 @@ func main() {
 
     http.HandleFunc("/multiply/", func(w http.ResponseWriter, r *http.Request) {
         num, _ := strconv.Atoi(r.URL.Path[len("/multiply/"):])
-        time.Sleep(time.Duration(2+rand.Float64()*3) * time.Second)
+
+        // select is Go's way of handling multiple channel operations
+        // It will execute the first case that's ready to proceed
+        select {
+            // Try to send to maxConcurrent channel (acquire semaphore)
+            case maxConcurrent <- struct{}{}:
+                // If we get here, we successfully acquired the semaphore
+                // This only happens if the channel isn't full (we haven't hit our concurrent limit)
+                log.Printf("✅ Resource slot acquired - processing...")
+    
+                // defer will run when this function returns
+                // This ensures we always release the semaphore, even if processing panics
+                defer func() { 
+                    // Receive from channel to release the semaphore
+                    <-maxConcurrent 
+                    log.Printf("♻️  Resource slot freed")
+                }()
+    
+            // default case runs immediately if the maxConcurrent channel is full
+            // This means we've hit our concurrent processing limit
+            default:
+                // We couldn't acquire the semaphore, so we're at capacity
+                // Instead of waiting, we immediately reject the request
+                log.Printf("❌ No resource slots available - service at capacity!")
+                http.Error(w, "Service at capacity", http.StatusServiceUnavailable)
+                return
+        }
+    
+        // If we get here, we have successfully acquired the semaphore
+        // and can proceed with our resource-intensive work...
+
+
+        time.Sleep(time.Duration(6+rand.Float64()*8) * time.Second)
+        log.Printf("returning the result for %d", num)
         
         json.NewEncoder(w).Encode(map[string]int{
             "result": num * 2,
